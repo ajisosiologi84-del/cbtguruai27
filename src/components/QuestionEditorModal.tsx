@@ -72,6 +72,11 @@ export const QuestionEditorModal: React.FC<QuestionEditorModalProps> = ({
   const [statementUrlValue, setStatementUrlValue] = useState<string>('');
   const [activeTab, setActiveTab] = useState<'editor' | 'preview'>('editor');
 
+  // Local Browser Draft Autosave & Recovery State
+  const [recoverableDraft, setRecoverableDraft] = useState<any | null>(null);
+  const [lastSavedTime, setLastSavedTime] = useState<string>('');
+  const autoSaveTimerRef = useRef<any>(null);
+
   // Ref for Question Textarea for cursor-accurate insertions
   const questionTextareaRef = useRef<HTMLTextAreaElement>(null);
 
@@ -311,7 +316,129 @@ export const QuestionEditorModal: React.FC<QuestionEditorModalProps> = ({
       setStatementUrlInputIdx(null);
       setStatementUrlValue('');
     }
+
+    // Check for recoverable draft in local storage
+    if (isOpen) {
+      const activeKg = (editingQuestion?.kodeGuru || defaultKodeGuru || 'GURU01').trim().toUpperCase();
+      const currentDraftKey = `cbt_draft_${activeKg}_${editingQuestion ? editingQuestion.id : 'new'}`;
+      try {
+        const savedDraft = localStorage.getItem(currentDraftKey);
+        if (savedDraft) {
+          const parsed = JSON.parse(savedDraft);
+          if (parsed && parsed.questionText && parsed.questionText.trim()) {
+            setRecoverableDraft(parsed);
+          }
+        }
+      } catch (e) {}
+    } else {
+      setRecoverableDraft(null);
+    }
   }, [editingQuestion, isOpen, defaultMapel, defaultKodeGuru]);
+
+  // Debounced Autosave Draft to Local Storage
+  useEffect(() => {
+    if (!isOpen) return;
+    const activeKg = (kodeGuruText || defaultKodeGuru || 'GURU01').trim().toUpperCase();
+    const currentDraftKey = `cbt_draft_${activeKg}_${editingQuestion ? editingQuestion.id : 'new'}`;
+
+    if (autoSaveTimerRef.current) {
+      clearTimeout(autoSaveTimerRef.current);
+    }
+
+    // Only save if there's meaningful content
+    const hasContent = questionText.trim() !== '' || optionsText.some((o) => o.trim() !== '') || questionImages.length > 0;
+    if (!hasContent) return;
+
+    autoSaveTimerRef.current = setTimeout(() => {
+      try {
+        const draftPayload = {
+          savedAt: new Date().toISOString(),
+          questionText,
+          explanationText,
+          explanationImages,
+          selectedMapel,
+          kompetensiText,
+          subTopikText,
+          bentukSoalText,
+          kodeGuruText: activeKg,
+          poinVal,
+          questionImages,
+          imagePosition,
+          optionsText,
+          optionImages,
+          correctIndex,
+          mcmaCorrectIndices,
+          categoryOptionsList,
+          categoryStatementsList,
+        };
+        localStorage.setItem(currentDraftKey, JSON.stringify(draftPayload));
+        setLastSavedTime(new Date().toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit', second: '2-digit' }));
+      } catch (e) {
+        console.warn('Autosave draft failed:', e);
+      }
+    }, 800);
+
+    return () => {
+      if (autoSaveTimerRef.current) {
+        clearTimeout(autoSaveTimerRef.current);
+      }
+    };
+  }, [
+    isOpen,
+    questionText,
+    explanationText,
+    explanationImages,
+    selectedMapel,
+    kompetensiText,
+    subTopikText,
+    bentukSoalText,
+    kodeGuruText,
+    poinVal,
+    questionImages,
+    imagePosition,
+    optionsText,
+    optionImages,
+    correctIndex,
+    mcmaCorrectIndices,
+    categoryOptionsList,
+    categoryStatementsList,
+    defaultKodeGuru,
+    editingQuestion,
+  ]);
+
+  const handleRestoreDraft = () => {
+    if (!recoverableDraft) return;
+    if (recoverableDraft.questionText !== undefined) setQuestionText(recoverableDraft.questionText);
+    if (recoverableDraft.explanationText !== undefined) setExplanationText(recoverableDraft.explanationText);
+    if (Array.isArray(recoverableDraft.explanationImages)) setExplanationImages(recoverableDraft.explanationImages);
+    if (recoverableDraft.selectedMapel) setSelectedMapel(recoverableDraft.selectedMapel);
+    if (recoverableDraft.kompetensiText !== undefined) setKompetensiText(recoverableDraft.kompetensiText);
+    if (recoverableDraft.subTopikText !== undefined) setSubTopikText(recoverableDraft.subTopikText);
+    if (recoverableDraft.bentukSoalText) setBentukSoalText(recoverableDraft.bentukSoalText);
+    if (recoverableDraft.kodeGuruText) setKodeGuruText(recoverableDraft.kodeGuruText);
+    if (typeof recoverableDraft.poinVal === 'number') setPoinVal(recoverableDraft.poinVal);
+    if (Array.isArray(recoverableDraft.questionImages)) setQuestionImages(recoverableDraft.questionImages);
+    if (recoverableDraft.imagePosition) setImagePosition(recoverableDraft.imagePosition);
+    if (Array.isArray(recoverableDraft.optionsText)) setOptionsText(recoverableDraft.optionsText);
+    if (Array.isArray(recoverableDraft.optionImages)) setOptionImages(recoverableDraft.optionImages);
+    if (typeof recoverableDraft.correctIndex === 'number') setCorrectIndex(recoverableDraft.correctIndex);
+    if (Array.isArray(recoverableDraft.mcmaCorrectIndices)) setMcmaCorrectIndices(recoverableDraft.mcmaCorrectIndices);
+    if (Array.isArray(recoverableDraft.categoryOptionsList)) setCategoryOptionsList(recoverableDraft.categoryOptionsList);
+    if (Array.isArray(recoverableDraft.categoryStatementsList)) setCategoryStatementsList(recoverableDraft.categoryStatementsList);
+
+    setRecoverableDraft(null);
+    showAlert('Draf soal berhasil dipulihkan dari peramban lokal!');
+  };
+
+  const handleDiscardDraft = () => {
+    const activeKg = (editingQuestion?.kodeGuru || defaultKodeGuru || 'GURU01').trim().toUpperCase();
+    const currentDraftKey = `cbt_draft_${activeKg}_${editingQuestion ? editingQuestion.id : 'new'}`;
+    try {
+      localStorage.removeItem(currentDraftKey);
+    } catch (e) {}
+    setRecoverableDraft(null);
+    showAlert('Draf soal yang tersimpan di browser telah dihapus.');
+  };
 
   if (!isOpen) return null;
 
@@ -776,6 +903,14 @@ export const QuestionEditorModal: React.FC<QuestionEditorModalProps> = ({
           image: st.image?.trim() || undefined,
         })),
       });
+
+      // Clear draft upon successful save
+      const activeKg = (kodeGuruText.trim().toUpperCase() || defaultKodeGuru || 'GURU01').toUpperCase();
+      const currentDraftKey = `cbt_draft_${activeKg}_${editingQuestion ? editingQuestion.id : 'new'}`;
+      try {
+        localStorage.removeItem(currentDraftKey);
+      } catch (e) {}
+      setRecoverableDraft(null);
       return;
     }
 
@@ -818,16 +953,32 @@ export const QuestionEditorModal: React.FC<QuestionEditorModalProps> = ({
       kodeGuru: kodeGuruText.trim().toUpperCase() || defaultKodeGuru || 'GURU01',
       poin: poinVal,
     });
+
+    // Clear draft upon successful save
+    const activeKg = (kodeGuruText.trim().toUpperCase() || defaultKodeGuru || 'GURU01').toUpperCase();
+    const currentDraftKey = `cbt_draft_${activeKg}_${editingQuestion ? editingQuestion.id : 'new'}`;
+    try {
+      localStorage.removeItem(currentDraftKey);
+    } catch (e) {}
+    setRecoverableDraft(null);
   };
 
   return (
     <div className="fixed inset-0 bg-black/70 z-[120] flex items-center justify-center p-4 backdrop-blur-sm animate-fade-in">
       <div className="bg-white rounded-2xl w-full max-w-3xl max-h-[90vh] flex flex-col shadow-2xl overflow-hidden border border-gray-100">
         <div className="bg-slate-900 text-white p-4 sm:p-5 font-bold text-lg flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3 shrink-0">
-          <span className="flex items-center gap-2">
-            {editingQuestion ? <Edit3 className="w-5 h-5 text-sky-400" /> : <PlusCircle className="w-5 h-5 text-sky-400" />}
-            {editingQuestion ? 'Edit Soal' : 'Tambah Soal Baru'}
-          </span>
+          <div className="flex flex-col sm:flex-row sm:items-center gap-2">
+            <span className="flex items-center gap-2">
+              {editingQuestion ? <Edit3 className="w-5 h-5 text-sky-400" /> : <PlusCircle className="w-5 h-5 text-sky-400" />}
+              {editingQuestion ? 'Edit Soal' : 'Tambah Soal Baru'}
+            </span>
+            {lastSavedTime && (
+              <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-emerald-950/80 border border-emerald-500/50 text-emerald-300 text-[11px] font-semibold">
+                <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse"></span>
+                Autosave lokal {lastSavedTime}
+              </span>
+            )}
+          </div>
 
           <div className="flex items-center gap-2 self-stretch sm:self-auto justify-between sm:justify-end">
             <div className="bg-slate-800 p-1 rounded-xl flex items-center gap-1 border border-slate-700">
@@ -866,6 +1017,41 @@ export const QuestionEditorModal: React.FC<QuestionEditorModalProps> = ({
 
         {activeTab === 'editor' ? (
           <div className="p-6 overflow-y-auto flex-1 space-y-5 custom-scrollbar">
+            {/* BANNER DRAFT RECOVERY JIKA ADA DRAF LOKAL */}
+            {recoverableDraft && (
+              <div className="bg-emerald-50 border-2 border-emerald-500 p-4 rounded-2xl flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 text-xs shadow-md animate-fade-in">
+                <div className="flex items-start gap-3">
+                  <span className="p-2 bg-emerald-600 text-white rounded-xl shadow-xs shrink-0 mt-0.5">
+                    <Save className="w-4 h-4" />
+                  </span>
+                  <div>
+                    <p className="font-extrabold text-emerald-950 text-sm">
+                      Draf Soal Ditemukan di Browser Lokal!
+                    </p>
+                    <p className="text-emerald-800 text-xs mt-0.5">
+                      Tersimpan pada {recoverableDraft.savedAt ? new Date(recoverableDraft.savedAt).toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit', second: '2-digit' }) : 'sesi sebelumnya'}. Pulihkan draf ini agar ketikan Anda tidak hilang saat berpindah menu/refresh.
+                    </p>
+                  </div>
+                </div>
+                <div className="flex items-center gap-2 self-stretch sm:self-auto justify-end shrink-0">
+                  <button
+                    type="button"
+                    onClick={handleRestoreDraft}
+                    className="bg-emerald-600 hover:bg-emerald-700 text-white font-extrabold px-3.5 py-2 rounded-xl shadow-sm transition-all cursor-pointer flex items-center gap-1.5 text-xs"
+                  >
+                    <CheckCircle2 className="w-4 h-4" /> Pulihkan Draf
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleDiscardDraft}
+                    className="bg-white hover:bg-red-50 text-red-600 border border-red-300 font-bold px-3 py-2 rounded-xl transition-all cursor-pointer flex items-center gap-1.5 text-xs"
+                  >
+                    <Trash2 className="w-4 h-4" /> Buang Draf
+                  </button>
+                </div>
+              </div>
+            )}
+
             {/* BANNER ANIMASI HIGHLIGHT FITUR BARU */}
             <div className="bg-gradient-to-r from-amber-500 via-sky-600 to-purple-600 p-0.5 rounded-2xl shadow-sm animate-pulse">
               <div className="bg-amber-50/90 p-3.5 rounded-[14px] flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 text-xs border border-amber-200">

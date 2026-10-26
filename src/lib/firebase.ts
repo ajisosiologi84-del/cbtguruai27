@@ -644,3 +644,96 @@ export function subscribeStudentsFromFirebase(onUpdate: (students: StudentUser[]
     } catch (e) {}
   };
 }
+
+const TEACHER_CONFIGS_COLLECTION = 'cbt_teacher_configs';
+
+/**
+ * Save / sync an individual teacher's isolated exam package to Firestore
+ * This prevents teachers from overwriting each other's questions when working concurrently.
+ */
+export async function saveTeacherExamPackageToFirebase(kodeGuru: string, packageData: any): Promise<boolean> {
+  if (isQuotaExceededStatus() || !kodeGuru) return false;
+  try {
+    const cleanKg = kodeGuru.trim().toUpperCase();
+    const docRef = doc(db, TEACHER_CONFIGS_COLLECTION, cleanKg);
+    await setDoc(docRef, {
+      ...packageData,
+      kodeGuru: cleanKg,
+      updatedAt: new Date().toISOString(),
+    }, { merge: true });
+    return true;
+  } catch (error) {
+    handleFirestoreError('saveTeacherExamPackage', error);
+    return false;
+  }
+}
+
+/**
+ * Load an individual teacher's isolated exam package from Firestore
+ */
+export async function loadTeacherExamPackageFromFirebase(kodeGuru: string): Promise<any | null> {
+  if (isQuotaExceededStatus() || !kodeGuru) return null;
+  try {
+    const cleanKg = kodeGuru.trim().toUpperCase();
+    const docRef = doc(db, TEACHER_CONFIGS_COLLECTION, cleanKg);
+    const snap = await getDoc(docRef);
+    if (snap.exists()) {
+      return snap.data();
+    }
+    return null;
+  } catch (error) {
+    handleFirestoreError('loadTeacherExamPackage', error);
+    return null;
+  }
+}
+
+/**
+ * Load all teachers' exam packages from Firestore (for Admin view & exam resolving)
+ */
+export async function loadAllTeacherExamPackagesFromFirebase(): Promise<Record<string, any>> {
+  if (isQuotaExceededStatus()) return {};
+  try {
+    const querySnap = await getDocs(collection(db, TEACHER_CONFIGS_COLLECTION));
+    const result: Record<string, any> = {};
+    querySnap.forEach((docSnap) => {
+      result[docSnap.id] = docSnap.data();
+    });
+    return result;
+  } catch (error) {
+    handleFirestoreError('loadAllTeacherExamPackages', error);
+    return {};
+  }
+}
+
+/**
+ * Subscribe to real-time updates for an individual teacher's isolated exam package
+ */
+export function subscribeTeacherExamPackageFromFirebase(kodeGuru: string, onUpdate: (data: any) => void): () => void {
+  if (isQuotaExceededStatus() || !kodeGuru) return () => {};
+  const cleanKg = kodeGuru.trim().toUpperCase();
+  const docRef = doc(db, TEACHER_CONFIGS_COLLECTION, cleanKg);
+  let unsubscribe: () => void = () => {};
+  try {
+    unsubscribe = onSnapshot(docRef, (snap) => {
+      if (snap.exists()) {
+        const data = snap.data();
+        if (data) {
+          onUpdate(data);
+        }
+      }
+    }, (err) => {
+      handleFirestoreError('subscribeTeacherExamPackage', err);
+      try {
+        if (unsubscribe) unsubscribe();
+      } catch (e) {}
+    });
+  } catch (err) {
+    handleFirestoreError('subscribeTeacherExamPackage', err);
+  }
+  return () => {
+    try {
+      if (unsubscribe) unsubscribe();
+    } catch (e) {}
+  };
+}
+

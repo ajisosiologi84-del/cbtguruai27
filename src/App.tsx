@@ -33,6 +33,10 @@ import {
   subscribeTeachersFromFirebase,
   subscribeStudentsFromFirebase,
   subscribeAdminsFromFirebase,
+  saveTeacherExamPackageToFirebase,
+  loadTeacherExamPackageFromFirebase,
+  loadAllTeacherExamPackagesFromFirebase,
+  subscribeTeacherExamPackageFromFirebase,
 } from './lib/firebase';
 import { fetchAppsScriptDatabase } from './utils/googleAppsScriptService';
 import { isSupabaseConfigured } from './lib/supabase';
@@ -266,7 +270,12 @@ export default function App() {
     return [];
   });
 
-  // Save config to LocalStorage & Firebase on updates
+  // View State & Admin Role
+  const [viewState, setViewState] = useState<ViewState>('login');
+  const [adminRole, setAdminRole] = useState<'admin' | 'teacher'>('admin');
+  const [loggedInTeacher, setLoggedInTeacher] = useState<TeacherUser | null>(null);
+
+  // Save config to LocalStorage & Firebase with Teacher Isolation
   const saveConfig = useCallback((newConfig: AppConfig) => {
     const activeToken = newConfig.examToken?.trim() || 'SOS2026';
     const updatedConfig = {
@@ -277,11 +286,39 @@ export default function App() {
     setConfig(updatedConfig);
     try {
       localStorage.setItem(STORAGE_KEY, JSON.stringify(updatedConfig));
-      saveConfigToFirebase(updatedConfig).catch(() => {});
     } catch (e) {
-      console.error('Failed to save to local storage or Firebase:', e);
+      console.warn('LocalStorage save failed:', e);
     }
-  }, []);
+
+    if (adminRole === 'teacher' && loggedInTeacher?.kodeGuru) {
+      const activeKg = loggedInTeacher.kodeGuru.toUpperCase();
+      const teacherQuestions = (newConfig.questions || []).filter(
+        (q) => (q.kodeGuru || '').toUpperCase() === activeKg
+      );
+
+      // 1. Save to teacher-specific local storage cache (never lost during teacher switch or refresh)
+      try {
+        localStorage.setItem(`cbt_questions_by_guru_${activeKg}`, JSON.stringify(teacherQuestions));
+      } catch (e) {}
+
+      // 2. Save isolated teacher package to Firestore /cbt_teacher_configs/{activeKg}
+      saveTeacherExamPackageToFirebase(activeKg, {
+        kodeGuru: activeKg,
+        namaGuru: loggedInTeacher.name,
+        mapel: loggedInTeacher.mapel || newConfig.mapel,
+        questions: teacherQuestions,
+        duration: newConfig.duration,
+        kkm: newConfig.kkm,
+        examToken: activeToken,
+        updatedAt: new Date().toISOString(),
+      }).catch((err) => {
+        console.warn('Gagal simpan paket guru ke Firebase:', err);
+      });
+    } else {
+      // Admin saves globally to master config
+      saveConfigToFirebase(updatedConfig).catch(() => {});
+    }
+  }, [adminRole, loggedInTeacher]);
 
   const saveStudentResults = useCallback((results: StudentResult[]) => {
     const seenIds = new Set<string>();
@@ -296,11 +333,6 @@ export default function App() {
     setStudentResults(sanitizedResults);
     safeSaveResultsToLocalStorage(RESULTS_KEY, sanitizedResults);
   }, []);
-
-  // View State & Admin Role
-  const [viewState, setViewState] = useState<ViewState>('login');
-  const [adminRole, setAdminRole] = useState<'admin' | 'teacher'>('admin');
-  const [loggedInTeacher, setLoggedInTeacher] = useState<TeacherUser | null>(null);
 
   // Helper to merge remote config without losing locally updated token
   const mergeRemoteConfigWithLocalToken = (remoteConfig: AppConfig): AppConfig => {
@@ -405,7 +437,7 @@ export default function App() {
     }
   }, []);
 
-  // Firebase Synchronization Effect (Solusi A - Optimasi Kuota: Listener Realtime HANYA aktif untuk Guru/Admin)
+  // Firebase Synchronization Effect (Multi-Guru Isolation: Guru hanya sync paket sendiri, Admin akses semua)
   useEffect(() => {
     // Siswa diset Write-Only (hanya kirim nilai akhir).
     // Jangan buka listener atau query terus-menerus di perangkat siswa/halaman login agar kuota 50k reads tidak habis oleh 360 siswa.
@@ -413,32 +445,140 @@ export default function App() {
       return;
     }
 
-    // Initial fetch from Firebase (Hanya dieksekusi saat Admin / Guru masuk)
-    loadConfigFromFirebase().then((remoteConfig) => {
-      if (remoteConfig && Array.isArray(remoteConfig.questions)) {
-        const cleanedQuestions = remoteConfig.questions.filter((q) => !isLegacyDefaultQuestion(q));
-        const merged = mergeRemoteConfigWithLocalToken({
-          ...remoteConfig,
-          questions: cleanedQuestions,
-        });
-        setConfig((prev) => {
-          const newConfig = {
+    let unsubConfig = () => {};
+    let unsubTeacher = () => {};
+
+    if (adminRole === 'teacher' && loggedInTeacher?.kodeGuru) {
+      const activeKg = loggedInTeacher.kodeGuru.toUpperCase();
+
+      // 1. Instantly load from local storage cache for this teacher (prevents empty screen/data loss)
+      try {
+        const localTeacherQuestions = localStorage.getItem(`cbt_questions_by_guru_${activeKg}`);
+        if (localTeacherQuestions) {
+          const parsed = JSON.parse(localTeacherQuestions);
+          if (Array.isArray(parsed) && parsed.length > 0) {
+            setConfig((prev) => {
+              const otherQuestions = prev.questions.filter((q) => (q.kodeGuru || '').toUpperCase() !== activeKg);
+              return {
+                ...prev,
+                kodeGuru: activeKg,
+                mapel: loggedInTeacher.mapel || prev.mapel,
+                questions: [...otherQuestions, ...parsed],
+              };
+            });
+          }
+        }
+      } catch (e) {}
+
+      // 2. Fetch isolated teacher exam package from Firestore /cbt_teacher_configs/{activeKg}
+      loadTeacherExamPackageFromFirebase(activeKg).then((pkg) => {
+        if (pkg && Array.isArray(pkg.questions)) {
+          setConfig((prev) => {
+            const otherQuestions = prev.questions.filter((q) => (q.kodeGuru || '').toUpperCase() !== activeKg);
+            const combined = [...otherQuestions, ...pkg.questions];
+            try {
+              localStorage.setItem(`cbt_questions_by_guru_${activeKg}`, JSON.stringify(pkg.questions));
+              localStorage.setItem(STORAGE_KEY, JSON.stringify({ ...prev, questions: combined }));
+            } catch (e) {}
+            return {
+              ...prev,
+              kodeGuru: activeKg,
+              mapel: pkg.mapel || loggedInTeacher.mapel || prev.mapel,
+              questions: combined,
+            };
+          });
+        }
+      }).catch(() => {});
+
+      // 3. Realtime listener ONLY on teacher's own package (will NEVER be overwritten by other teachers working concurrently)
+      unsubTeacher = subscribeTeacherExamPackageFromFirebase(activeKg, (pkg) => {
+        if (pkg && Array.isArray(pkg.questions)) {
+          setConfig((prev) => {
+            const otherQuestions = prev.questions.filter((q) => (q.kodeGuru || '').toUpperCase() !== activeKg);
+            const combined = [...otherQuestions, ...pkg.questions];
+            try {
+              localStorage.setItem(`cbt_questions_by_guru_${activeKg}`, JSON.stringify(pkg.questions));
+              localStorage.setItem(STORAGE_KEY, JSON.stringify({ ...prev, questions: combined }));
+            } catch (e) {}
+            return {
+              ...prev,
+              kodeGuru: activeKg,
+              mapel: pkg.mapel || prev.mapel,
+              questions: combined,
+            };
+          });
+        }
+      });
+    } else {
+      // ADMIN: Access all subjects and global configs
+      loadConfigFromFirebase().then((remoteConfig) => {
+        if (remoteConfig && Array.isArray(remoteConfig.questions)) {
+          const cleanedQuestions = remoteConfig.questions.filter((q) => !isLegacyDefaultQuestion(q));
+          const merged = mergeRemoteConfigWithLocalToken({
+            ...remoteConfig,
+            questions: cleanedQuestions,
+          });
+          setConfig((prev) => {
+            const newConfig = {
+              ...merged,
+              questions: cleanedQuestions,
+              teachers: (merged.teachers && merged.teachers.length > 0) ? merged.teachers : prev.teachers,
+              students: (merged.students && merged.students.length > 0) ? merged.students : prev.students,
+            };
+            try {
+              localStorage.setItem(STORAGE_KEY, JSON.stringify(newConfig));
+            } catch (e) {}
+            if (remoteConfig.questions.some(isLegacyDefaultQuestion)) {
+              saveConfigToFirebase(newConfig).catch(() => {});
+            }
+            return newConfig;
+          });
+        }
+      }).catch(() => {});
+
+      // Admin loads all teacher packages to merge into comprehensive bank
+      loadAllTeacherExamPackagesFromFirebase().then((allPkgs) => {
+        if (allPkgs && allPkgs.length > 0) {
+          setConfig((prev) => {
+            const mapById = new Map<number, Question>();
+            prev.questions.forEach((q) => mapById.set(q.id, q));
+            allPkgs.forEach((pkg) => {
+              if (Array.isArray(pkg.questions)) {
+                pkg.questions.forEach((q) => mapById.set(q.id, q));
+              }
+            });
+            const mergedAll = Array.from(mapById.values());
+            try {
+              localStorage.setItem(STORAGE_KEY, JSON.stringify({ ...prev, questions: mergedAll }));
+            } catch (e) {}
+            return {
+              ...prev,
+              questions: mergedAll,
+            };
+          });
+        }
+      }).catch(() => {});
+
+      // Admin listens to master config
+      unsubConfig = subscribeConfigFromFirebase((remoteConfig) => {
+        if (remoteConfig && Array.isArray(remoteConfig.questions)) {
+          const cleanedQuestions = remoteConfig.questions.filter((q) => !isLegacyDefaultQuestion(q));
+          const merged = mergeRemoteConfigWithLocalToken({
+            ...remoteConfig,
+            questions: cleanedQuestions,
+          });
+          setConfig((prev) => ({
             ...merged,
             questions: cleanedQuestions,
-            teachers: (merged.teachers && merged.teachers.length > 0) ? merged.teachers : prev.teachers,
             students: (merged.students && merged.students.length > 0) ? merged.students : prev.students,
-          };
+            teachers: (merged.teachers && merged.teachers.length > 0) ? merged.teachers : prev.teachers,
+          }));
           try {
-            localStorage.setItem(STORAGE_KEY, JSON.stringify(newConfig));
+            localStorage.setItem(STORAGE_KEY, JSON.stringify({ ...merged, questions: cleanedQuestions }));
           } catch (e) {}
-          // If remoteConfig still had legacy questions, sync the cleaned version to Firebase
-          if (remoteConfig.questions.some(isLegacyDefaultQuestion)) {
-            saveConfigToFirebase(newConfig).catch(() => {});
-          }
-          return newConfig;
-        });
-      }
-    }).catch(() => {});
+        }
+      });
+    }
 
     // Fetch Teachers, Students, and Admins from Firebase for Admin/Teacher dashboard
     loadTeachersFromFirebase().then((remoteTeachers) => {
@@ -483,26 +623,6 @@ export default function App() {
         safeSaveResultsToLocalStorage(RESULTS_KEY, remoteResults);
       }
     }).catch(() => {});
-
-    // Realtime subscribers (HANYA AKTIF SAAT viewState === 'admin')
-    const unsubConfig = subscribeConfigFromFirebase((remoteConfig) => {
-      if (remoteConfig && Array.isArray(remoteConfig.questions)) {
-        const cleanedQuestions = remoteConfig.questions.filter((q) => !isLegacyDefaultQuestion(q));
-        const merged = mergeRemoteConfigWithLocalToken({
-          ...remoteConfig,
-          questions: cleanedQuestions,
-        });
-        setConfig((prev) => ({
-          ...merged,
-          questions: cleanedQuestions,
-          students: (merged.students && merged.students.length > 0) ? merged.students : prev.students,
-          teachers: (merged.teachers && merged.teachers.length > 0) ? merged.teachers : prev.teachers,
-        }));
-        try {
-          localStorage.setItem(STORAGE_KEY, JSON.stringify({ ...merged, questions: cleanedQuestions }));
-        } catch (e) {}
-      }
-    });
 
     const unsubTeachers = subscribeTeachersFromFirebase((remoteTeachers) => {
       if (Array.isArray(remoteTeachers) && remoteTeachers.length > 0) {
@@ -549,12 +669,13 @@ export default function App() {
 
     return () => {
       unsubConfig();
+      unsubTeacher();
       unsubTeachers();
       unsubStudents();
       unsubAdmins();
       unsubResults();
     };
-  }, [viewState]);
+  }, [viewState, adminRole, loggedInTeacher?.kodeGuru]);
 
   // Google Apps Script Auto-Sync Effect for Fresh Browsers
   useEffect(() => {
@@ -1456,8 +1577,25 @@ export default function App() {
   };
 
   const handleResetDefaultQuestions = () => {
-    saveConfig({ ...config, questions: [] });
-    showAlert('Bank soal berhasil dikosongkan.');
+    if (adminRole === 'teacher' && loggedInTeacher?.kodeGuru) {
+      const activeKg = loggedInTeacher.kodeGuru.toUpperCase();
+      const updated = config.questions.filter((q) => (q.kodeGuru || '').toUpperCase() !== activeKg);
+      try {
+        localStorage.removeItem(`cbt_questions_by_guru_${activeKg}`);
+      } catch (e) {}
+      saveTeacherExamPackageToFirebase(activeKg, {
+        kodeGuru: activeKg,
+        namaGuru: loggedInTeacher.name,
+        mapel: loggedInTeacher.mapel || config.mapel,
+        questions: [],
+        updatedAt: new Date().toISOString(),
+      }).catch(() => {});
+      saveConfig({ ...config, questions: updated });
+      showAlert(`Bank soal Anda (${loggedInTeacher.mapel || activeKg}) berhasil dikosongkan.`);
+    } else {
+      saveConfig({ ...config, questions: [] });
+      showAlert('Bank soal berhasil dikosongkan.');
+    }
   };
 
   return (
@@ -1477,6 +1615,71 @@ export default function App() {
             setAdminRole(role);
             setLoggedInTeacher(teacherDetails || null);
             setViewState('admin');
+
+            if (role === 'teacher' && teacherDetails?.kodeGuru) {
+              const activeKg = teacherDetails.kodeGuru.toUpperCase();
+              // Immediate local cache restore so teacher never sees 0 or overwritten questions
+              try {
+                const cachedQ = localStorage.getItem(`cbt_questions_by_guru_${activeKg}`);
+                if (cachedQ) {
+                  const parsed = JSON.parse(cachedQ);
+                  if (Array.isArray(parsed) && parsed.length > 0) {
+                    setConfig((prev) => {
+                      const otherQ = prev.questions.filter((q) => (q.kodeGuru || '').toUpperCase() !== activeKg);
+                      return {
+                        ...prev,
+                        kodeGuru: activeKg,
+                        mapel: teacherDetails.mapel || prev.mapel,
+                        questions: [...otherQ, ...parsed],
+                      };
+                    });
+                  }
+                }
+              } catch (e) {}
+
+              // Sync latest from Firestore collection /cbt_teacher_configs/{activeKg}
+              loadTeacherExamPackageFromFirebase(activeKg).then((pkg) => {
+                if (pkg && Array.isArray(pkg.questions)) {
+                  setConfig((prev) => {
+                    const otherQ = prev.questions.filter((q) => (q.kodeGuru || '').toUpperCase() !== activeKg);
+                    const combined = [...otherQ, ...pkg.questions];
+                    try {
+                      localStorage.setItem(`cbt_questions_by_guru_${activeKg}`, JSON.stringify(pkg.questions));
+                      localStorage.setItem(STORAGE_KEY, JSON.stringify({ ...prev, questions: combined }));
+                    } catch (e) {}
+                    return {
+                      ...prev,
+                      kodeGuru: activeKg,
+                      mapel: pkg.mapel || teacherDetails.mapel || prev.mapel,
+                      questions: combined,
+                    };
+                  });
+                }
+              }).catch(() => {});
+            } else if (role === 'admin') {
+              // Admin gets access to all mapel by loading all teacher packages
+              loadAllTeacherExamPackagesFromFirebase().then((allPkgs) => {
+                if (allPkgs && allPkgs.length > 0) {
+                  setConfig((prev) => {
+                    const mapById = new Map<number, Question>();
+                    prev.questions.forEach((q) => mapById.set(q.id, q));
+                    allPkgs.forEach((pkg) => {
+                      if (Array.isArray(pkg.questions)) {
+                        pkg.questions.forEach((q) => mapById.set(q.id, q));
+                      }
+                    });
+                    const mergedAll = Array.from(mapById.values());
+                    try {
+                      localStorage.setItem(STORAGE_KEY, JSON.stringify({ ...prev, questions: mergedAll }));
+                    } catch (e) {}
+                    return {
+                      ...prev,
+                      questions: mergedAll,
+                    };
+                  });
+                }
+              }).catch(() => {});
+            }
           }}
         />
       )}

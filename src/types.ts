@@ -124,7 +124,10 @@ export interface ExamScheduleConfig {
 
 export interface TeacherConfigOverride {
   kodeGuru: string;
+  namaGuru?: string;
   mapel?: string;
+  mapelTitle?: string;
+  questions?: Question[];
   duration?: number;
   kkm?: number;
   examToken?: string;
@@ -135,6 +138,8 @@ export interface TeacherConfigOverride {
   maxAttempts?: number;
   kopSekolah?: KopSekolahConfig;
   examSchedule?: ExamScheduleConfig;
+  scheduleTokens?: ExamScheduleToken[];
+  updatedAt?: string;
 }
 
 export interface ExamScheduleToken {

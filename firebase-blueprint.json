@@ -48,12 +48,30 @@
         "kodeGuru": { "type": "string" },
         "isActive": { "type": "boolean" }
       }
+    },
+    "TeacherExamConfig": {
+      "title": "TeacherExamConfig",
+      "description": "Isolated exam package, question bank, and settings per teacher code",
+      "type": "object",
+      "properties": {
+        "kodeGuru": { "type": "string" },
+        "mapel": { "type": "string" },
+        "questions": { "type": "array" },
+        "examToken": { "type": "string" },
+        "duration": { "type": "number" },
+        "kkm": { "type": "number" },
+        "updatedAt": { "type": "string" }
+      }
     }
   },
   "firestore": {
     "/cbt_config/{configId}": {
       "schema": { "$ref": "#/entities/CbtConfig" },
       "description": "Central CBT active configuration"
+    },
+    "/cbt_teacher_configs/{teacherId}": {
+      "schema": { "$ref": "#/entities/TeacherExamConfig" },
+      "description": "Isolated teacher-specific question bank and exam package"
     },
     "/student_results/{resultId}": {
       "schema": { "$ref": "#/entities/StudentResult" },

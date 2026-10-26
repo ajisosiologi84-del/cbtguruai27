@@ -46,6 +46,13 @@ service cloud.firestore {
       allow delete: if isValidId(configId);
     }
 
+    // Teacher Isolated Configurations & Question Packages
+    match /cbt_teacher_configs/{teacherId} {
+      allow read: if isValidId(teacherId);
+      allow create, update: if isValidId(teacherId) && isValidConfig(request.resource.data);
+      allow delete: if isValidId(teacherId);
+    }
+
     // Student Results
     match /student_results/{resultId} {
       allow read: if isValidId(resultId);
